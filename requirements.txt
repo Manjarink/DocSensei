@@ -16,3 +16,5 @@ fpdf2>=2.7.0
 #   macOS:  brew install portaudio && pip install pyaudio
 #   Ubuntu: sudo apt-get install portaudio19-dev && pip install pyaudio
 SpeechRecognition>=3.10.0
+# Dev / testing
+pytest>=8.0.0

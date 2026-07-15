@@ -4,13 +4,17 @@ utils/loaders.py – Document loaders for PDF and DOCX files.
 Handles loading, validation, and text extraction from uploaded documents.
 """
 
-import os
 import hashlib
 import logging
+import warnings
 from pathlib import Path
 from typing import Optional
 
-from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader
+# langchain-community emits a sunset DeprecationWarning at import time;
+# suppress it since PyPDFLoader / Docx2txtLoader still work correctly.
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", category=DeprecationWarning, module="langchain_community")
+    from langchain_community.document_loaders import PyPDFLoader, Docx2txtLoader
 from langchain_core.documents import Document
 
 import config
