@@ -1,10 +1,10 @@
-"""
-app.py – DocSensei main Streamlit application.
-
-Entry point for the DocSensei AI PDF & DOCX Question Answering System.
-Orchestrates the sidebar, document processing pipeline, chat interface,
-and all bonus features.
-"""
+# Override sqlite3 with pysqlite3 if available (required for ChromaDB on some Linux/Streamlit Cloud environments)
+import sys
+try:
+    __import__('pysqlite3')
+    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+except ImportError:
+    pass
 
 import logging
 import time
