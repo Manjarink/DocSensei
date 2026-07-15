@@ -39,7 +39,7 @@ LLM_MAX_TOKENS: int = 8192
 # ─────────────────────────────────────────────
 # Embedding Configuration
 # ─────────────────────────────────────────────
-EMBEDDING_MODEL: str = "models/embedding-001"
+EMBEDDING_MODEL: str = "models/text-embedding-004"
 
 # ─────────────────────────────────────────────
 # Text Splitting Configuration
