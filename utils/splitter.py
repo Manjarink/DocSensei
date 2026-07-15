@@ -63,8 +63,21 @@ def split_documents(
     if not documents:
         raise ValueError("No documents provided for splitting.")
 
+    # Filter out empty or whitespace-only documents (e.g., scanned PDFs without OCR)
+    valid_documents = [d for d in documents if d.page_content and d.page_content.strip()]
+    if not valid_documents:
+        raise ValueError(
+            "No readable text could be extracted from the uploaded document(s). "
+            "Please check if the file is a scanned image-only PDF, empty, or password-protected."
+        )
+
     splitter = build_splitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-    chunks = splitter.split_documents(documents)
+    chunks = splitter.split_documents(valid_documents)
+
+    if not chunks:
+        raise ValueError(
+            "Splitting produced zero chunks. The extracted document text may be too short."
+        )
 
     # Add chunk index metadata per source
     source_chunk_counters: dict[str, int] = {}

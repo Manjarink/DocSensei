@@ -63,7 +63,7 @@ SIMILARITY_THRESHOLD: float = 0.3
 # ─────────────────────────────────────────────
 # File Upload Configuration
 # ─────────────────────────────────────────────
-MAX_FILE_SIZE_MB: int = 50
+MAX_FILE_SIZE_MB: int = 200
 MAX_FILE_SIZE_BYTES: int = MAX_FILE_SIZE_MB * 1024 * 1024
 ALLOWED_EXTENSIONS: list[str] = [".pdf", ".docx"]
 
