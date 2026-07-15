@@ -11,5 +11,8 @@ python-dotenv>=1.0.0
 pydantic>=2.0.0
 tiktoken>=0.7.0
 fpdf2>=2.7.0
+# SpeechRecognition is optional (voice input bonus feature).
+# pyaudio requires PortAudio system library:
+#   macOS:  brew install portaudio && pip install pyaudio
+#   Ubuntu: sudo apt-get install portaudio19-dev && pip install pyaudio
 SpeechRecognition>=3.10.0
-pyaudio>=0.2.14
