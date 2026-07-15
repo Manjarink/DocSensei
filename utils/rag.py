@@ -1,9 +1,9 @@
 """
 utils/rag.py – RAG pipeline orchestration for DocSensei.
 
-Implements the full Retrieval-Augmented Generation pipeline using LangChain,
-ChromaDB, and Google Gemini. Supports streaming, conversation memory,
-document summaries, and suggested questions.
+Implements the full Retrieval-Augmented Generation pipeline using
+langchain_core (LCEL), ChromaDB, and Google Gemini.
+Compatible with LangChain 1.x (no langchain.chains dependency).
 """
 
 import ast
@@ -12,9 +12,9 @@ from typing import Generator, Optional
 
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.chains import create_history_aware_retriever, create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
 
 import config
 from utils.vector_db import VectorDatabase
@@ -24,7 +24,6 @@ from utils.prompts import (
     SUMMARY_PROMPT_TEMPLATE,
     SUGGESTED_QUESTIONS_PROMPT,
 )
-from utils.helpers import format_sources
 
 logger = logging.getLogger(__name__)
 
@@ -63,47 +62,15 @@ def build_llm(streaming: bool = False) -> ChatGoogleGenerativeAI:
 
 
 # ─────────────────────────────────────────────
-# History-Aware RAG Chain
-# ─────────────────────────────────────────────
-
-def build_rag_chain(vector_db: VectorDatabase):
-    """
-    Build the full history-aware RAG chain.
-
-    Uses create_history_aware_retriever to reformulate questions
-    based on chat history, then passes the retrieved context to Gemini.
-
-    Args:
-        vector_db: The VectorDatabase instance with indexed documents.
-
-    Returns:
-        LangChain retrieval chain.
-    """
-    llm = build_llm(streaming=False)
-    retriever = vector_db.get_retriever(k=config.RETRIEVAL_TOP_K)
-
-    # History-aware retriever: reformulates question using chat history
-    history_aware_retriever = create_history_aware_retriever(
-        llm, retriever, CONTEXTUALISE_Q_PROMPT
-    )
-
-    # Document QA chain
-    question_answer_chain = create_stuff_documents_chain(llm, RAG_PROMPT)
-
-    # Full RAG chain
-    rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
-    return rag_chain
-
-
-# ─────────────────────────────────────────────
-# Main RAG Interface
+# Main RAG Interface (LCEL-based, no langchain.chains)
 # ─────────────────────────────────────────────
 
 class RAGPipeline:
     """
     High-level interface for the DocSensei RAG pipeline.
 
-    Manages the LLM chain, chat history conversion, and streaming.
+    Built entirely with langchain_core LCEL — no dependency on
+    the deprecated langchain.chains module.
     """
 
     def __init__(self, vector_db: VectorDatabase) -> None:
@@ -114,14 +81,9 @@ class RAGPipeline:
             vector_db: Initialised VectorDatabase instance.
         """
         self.vector_db = vector_db
-        self._chain = None
+        self._last_source_docs: list[Document] = []
 
-    @property
-    def chain(self):
-        """Lazily build and cache the RAG chain."""
-        if self._chain is None:
-            self._chain = build_rag_chain(self.vector_db)
-        return self._chain
+    # ── Internal helpers ──
 
     def _convert_history(
         self, chat_history: list[dict]
@@ -135,15 +97,64 @@ class RAGPipeline:
         Returns:
             List of HumanMessage / AIMessage objects.
         """
-        messages = []
+        messages: list[HumanMessage | AIMessage] = []
         for msg in chat_history:
             if msg["role"] == "user":
                 messages.append(HumanMessage(content=msg["content"]))
             elif msg["role"] == "assistant":
-                # Strip source section from stored messages to reduce noise
+                # Strip source section to reduce noise in context
                 content = msg["content"].split("📚 **Sources**")[0].strip()
                 messages.append(AIMessage(content=content))
         return messages
+
+    def _reformulate_question(
+        self,
+        question: str,
+        lc_history: list,
+    ) -> str:
+        """
+        Reformulate the question as a standalone query using chat history.
+
+        If there is no prior history the original question is returned as-is.
+
+        Args:
+            question: The user's raw question.
+            lc_history: LangChain message history list.
+
+        Returns:
+            Standalone question string.
+        """
+        if not lc_history:
+            return question
+
+        try:
+            llm = build_llm()
+            chain = CONTEXTUALISE_Q_PROMPT | llm | StrOutputParser()
+            return chain.invoke({
+                "input": question,
+                "chat_history": lc_history,
+            })
+        except Exception as exc:
+            logger.warning("Question reformulation failed, using original: %s", exc)
+            return question
+
+    def _build_context(self, docs: list[Document]) -> str:
+        """
+        Concatenate document chunks into a single context string.
+
+        Args:
+            docs: Retrieved Document objects.
+
+        Returns:
+            Newline-separated page content string.
+        """
+        return "\n\n".join(
+            f"[Source: {d.metadata.get('source', 'Unknown')}, "
+            f"Page: {d.metadata.get('page', 'N/A')}]\n{d.page_content}"
+            for d in docs
+        )
+
+    # ── Public interface ──
 
     def answer(
         self,
@@ -151,27 +162,54 @@ class RAGPipeline:
         chat_history: list[dict],
     ) -> tuple[str, list[Document]]:
         """
-        Generate a non-streaming answer to the user's question.
+        Generate a complete answer to the user's question.
+
+        Pipeline:
+          1. Convert chat history to LangChain messages
+          2. Reformulate question as standalone if history exists
+          3. Retrieve top-k similar chunks from ChromaDB
+          4. Build context string from retrieved chunks
+          5. Invoke Gemini with the RAG prompt
+          6. Return answer text + source documents
 
         Args:
             question: User's natural language question.
-            chat_history: Prior conversation history.
+            chat_history: Prior conversation history (Streamlit format).
 
         Returns:
             Tuple of (answer_text, source_documents).
 
         Raises:
-            RuntimeError: If the LLM call fails.
+            RuntimeError: If the LLM call or retrieval fails.
         """
         try:
             lc_history = self._convert_history(chat_history)
-            result = self.chain.invoke({
-                "input": question,
-                "chat_history": lc_history,
-            })
-            answer = result.get("answer", "")
-            source_docs = result.get("context", [])
-            return answer, source_docs
+
+            # Step 1: Reformulate to standalone question
+            standalone_q = self._reformulate_question(question, lc_history)
+            logger.info("Standalone question: %s", standalone_q[:100])
+
+            # Step 2: Retrieve relevant chunks
+            source_docs = self.vector_db.similarity_search(
+                standalone_q, k=config.RETRIEVAL_TOP_K
+            )
+            logger.info("Retrieved %d chunks.", len(source_docs))
+
+            # Step 3: Build context
+            context = self._build_context(source_docs)
+
+            # Step 4: Invoke LLM via RAG prompt
+            llm = build_llm()
+            prompt_messages = RAG_PROMPT.format_messages(
+                context=context,
+                chat_history=lc_history,
+                input=question,
+            )
+            response = llm.invoke(prompt_messages)
+            answer_text = response.content if hasattr(response, "content") else str(response)
+
+            self._last_source_docs = source_docs
+            return answer_text, source_docs
 
         except Exception as exc:
             raise RuntimeError(f"RAG pipeline error: {exc}") from exc
@@ -182,39 +220,28 @@ class RAGPipeline:
         chat_history: list[dict],
     ) -> Generator[str, None, None]:
         """
-        Stream an answer token-by-token, yielding chunks.
+        Stream the answer character-by-character.
 
-        This method uses a non-streaming chain for retrieval (for accuracy)
-        then streams the final LLM response independently using direct
-        Gemini streaming.
+        Retrieves the full answer first (for accuracy), then yields it
+        in small chunks to produce a streaming effect in the UI.
 
         Args:
             question: User question.
             chat_history: Prior conversation.
 
         Yields:
-            String chunks of the answer as they are generated.
+            String chunks of the answer.
         """
-        # First, retrieve context via the RAG chain
-        lc_history = self._convert_history(chat_history)
-        result = self.chain.invoke({
-            "input": question,
-            "chat_history": lc_history,
-        })
-        full_answer: str = result.get("answer", "")
-        source_docs: list[Document] = result.get("context", [])
-
-        # Yield the answer in chunks to simulate streaming
-        chunk_size = 8
-        for i in range(0, len(full_answer), chunk_size):
-            yield full_answer[i:i + chunk_size]
-
-        # Store sources on instance for retrieval after streaming
+        full_answer, source_docs = self.answer(question, chat_history)
         self._last_source_docs = source_docs
 
+        chunk_size = 8
+        for i in range(0, len(full_answer), chunk_size):
+            yield full_answer[i: i + chunk_size]
+
     def get_last_sources(self) -> list[Document]:
-        """Return sources from the last stream_answer call."""
-        return getattr(self, "_last_source_docs", [])
+        """Return source documents from the last answer() / stream_answer() call."""
+        return self._last_source_docs
 
 
 # ─────────────────────────────────────────────
@@ -240,18 +267,18 @@ def summarise_document(
     if not chunks:
         return "No content available for summarisation."
 
-    llm = build_llm(streaming=False)
+    llm = build_llm()
     sample = chunks[:max_chunks]
     combined_text = "\n\n".join(c.page_content for c in sample)
 
     prompt = SUMMARY_PROMPT_TEMPLATE.format(
         doc_name=doc_name,
-        content=combined_text[:4000],  # Limit context length
+        content=combined_text[:4000],
     )
 
     try:
         response = llm.invoke(prompt)
-        return response.content
+        return response.content if hasattr(response, "content") else str(response)
     except Exception as exc:
         logger.error("Summary generation failed: %s", exc)
         return f"Could not generate summary: {exc}"
@@ -269,12 +296,12 @@ def generate_suggested_questions(chunks: list[Document]) -> list[str]:
         chunks: List of Document chunks to analyse.
 
     Returns:
-        List of 5 suggested question strings.
+        List of up to 5 suggested question strings.
     """
     if not chunks:
         return []
 
-    llm = build_llm(streaming=False)
+    llm = build_llm()
     sample = chunks[:8]
     combined = "\n\n".join(c.page_content for c in sample)
 
@@ -282,8 +309,7 @@ def generate_suggested_questions(chunks: list[Document]) -> list[str]:
 
     try:
         response = llm.invoke(prompt)
-        raw = response.content.strip()
-        # Safely parse the list
+        raw = response.content.strip() if hasattr(response, "content") else str(response).strip()
         questions = ast.literal_eval(raw)
         if isinstance(questions, list):
             return [str(q) for q in questions[:5]]
