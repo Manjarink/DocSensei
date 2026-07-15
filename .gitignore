@@ -69,3 +69,7 @@ logs/
 
 # Node (if any tooling)
 node_modules/
+
+# Streamlit agent skills (environment-specific symlinks)
+.agents/
+
